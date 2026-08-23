@@ -1,0 +1,4 @@
+xray_module/dataset/
+*.zip
+__pycache__/
+*.pyc
