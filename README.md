@@ -31,3 +31,13 @@ Predictions from both modules are combined using a weighted fusion logic to prod
 ## 🧠 Fusion Logic
 
 Since no single dataset had X-ray and clinical data for the same patients, we use a weighted ensemble approach:
+
+#sputum
+## Sputum Module
+- Model: MobileNetV2 (transfer learning + fine-tuning) on Ziehl-Neelsen sputum smear images
+- Dataset: AI-TB-ZN (Zenodo), 512 images (256 positive, 256 negative), CC BY 4.0
+- Split: 70% train / 15% validation / 15% test (stratified)
+- Test accuracy: 95% (77 test images)
+- Output: TB probability (0 to 1), 1 = TB positive
+- Files: `sputum_module/predict.py`, `sputum_module/sputum_model_finetuned.keras`
+- Limitation: small single-source dataset, not validated for clinical use
