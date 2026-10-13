@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 import streamlit as st
 import numpy as np
 import joblib
@@ -18,34 +21,42 @@ def load_clinical_model():
     features = joblib.load('clinical_module/clinical_features.pkl')
     return model, scaler, features
 
+@st.cache_resource
+def load_cough_predictor():
+    # Heavy (torch + wav2vec2), so it is loaded only when a cough file is uploaded.
+    # Returns (function, error_message).
+    try:
+        from cough_audio_module.cough_module import predict_cough
+        return predict_cough, None
+    except Exception as e:
+        return None, str(e)
+
 xray_model = load_xray_model()
 clinical_model, clinical_scaler, clinical_features = load_clinical_model()
 
 # --- Fusion Logic ---
-def combined_prediction(xray_prob=None, clinical_prob=None):
-    probs = []
-    weights = []
+# Cough gets a small weight: on its own it is a weak signal (patient-level AUC ~0.69).
+WEIGHTS = {"xray": 0.6, "clinical": 0.4, "cough": 0.1}
 
-    if xray_prob is not None:
-        probs.append(xray_prob)
-        weights.append(0.6)   # X-ray is generally more reliable
-    if clinical_prob is not None:
-        probs.append(clinical_prob)
-        weights.append(0.4)
+def combined_prediction(xray_prob=None, clinical_prob=None, cough_prob=None):
+    inputs = {"xray": xray_prob, "clinical": clinical_prob, "cough": cough_prob}
+    available = {k: v for k, v in inputs.items() if v is not None}
 
-    if not probs:
+    if not available:
         return None, "No input provided"
 
-    final_score = sum(p * w for p, w in zip(probs, weights)) / sum(weights)
+    total_weight = sum(WEIGHTS[k] for k in available)
+    final_score = sum(v * WEIGHTS[k] for k, v in available.items()) / total_weight
     label = "TB Positive" if final_score > 0.5 else "Normal"
     return round(float(final_score), 3), label
 
 # --- UI ---
 st.title("🩺 Tuberculosis Prediction System")
-st.write("Upload a chest X-ray and/or enter symptom details to get a TB risk prediction. You can provide either or both.")
+st.write("Upload a chest X-ray, enter symptom details and/or upload a cough recording to get a TB risk prediction. You can provide any of them.")
 
 xray_prob = None
 clinical_prob = None
+cough_prob = None
 
 # --- X-ray Section ---
 st.subheader("1. Chest X-ray (optional)")
@@ -99,16 +110,48 @@ if use_clinical:
     clinical_prob = float(clinical_model.predict(input_scaled)[0][0])
     st.write(f"**Clinical model risk score:** {clinical_prob:.2f}")
 
+# --- Cough Section ---
+st.subheader("3. Cough Audio (optional)")
+cough_files = st.file_uploader(
+    "Upload one or more cough recordings (same patient)",
+    type=['wav', 'mp3', 'ogg', 'flac'],
+    accept_multiple_files=True,
+)
+if cough_files:
+    predict_cough, cough_error = load_cough_predictor()
+    if predict_cough is None:
+        st.warning(f"Cough model could not be loaded: {cough_error}")
+    else:
+        tmp_paths = []
+        try:
+            for f in cough_files:
+                suffix = os.path.splitext(f.name)[1] or ".wav"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(f.getbuffer())
+                    tmp_paths.append(tmp.name)
+            with st.spinner("Analysing cough..."):
+                cough_prob = float(predict_cough(tmp_paths))
+            st.write(f"**Cough model risk score:** {cough_prob:.2f}")
+            st.caption("Cough alone is a weak TB signal (research result: patient-level AUC ~0.69), so it has a small weight in the final score.")
+        except Exception as e:
+            st.warning(f"Could not process the cough audio: {e}")
+        finally:
+            for p in tmp_paths:
+                if os.path.exists(p):
+                    os.remove(p)
+
 # --- Final Combined Prediction ---
 st.subheader("Final Prediction")
 if st.button("Get Combined Prediction"):
-    final_score, label = combined_prediction(xray_prob, clinical_prob)
+    final_score, label = combined_prediction(xray_prob, clinical_prob, cough_prob)
     if final_score is not None:
+        if xray_prob is None and clinical_prob is None and cough_prob is not None:
+            st.warning("Only cough audio was provided. This is a low-confidence result; add an X-ray or symptoms for a more reliable prediction.")
         if label == "TB Positive":
             st.error(f"**Result: {label}**  (confidence score: {final_score})")
         else:
             st.success(f"**Result: {label}**  (confidence score: {final_score})")
     else:
-        st.warning("Please upload an X-ray or enter symptom data first.")
+        st.warning("Please upload an X-ray, enter symptom data or upload a cough recording first.")
 
-st.caption("⚠️ This is a student/research project and NOT a certified medical diagnostic tool. Please consult a doctor for actual diagnosis.")
+st.caption("⚠️ This is a student/research project and NOT a certified medical diagnostic tool. Please consult a doctor for actual diagnosis.")        
