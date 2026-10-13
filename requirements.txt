@@ -8,3 +8,8 @@ opencv-python
 librosa
 joblib
 streamlit
+torch
+transformers
+librosa
+soundfile
+scikit-learn
