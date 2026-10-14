@@ -1,114 +1,392 @@
+from pathlib import Path
+import tempfile
+
 import streamlit as st
 import numpy as np
 import joblib
+from PIL import Image
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
 
-st.set_page_config(page_title="TB Prediction System", layout="centered")
 
-# --- Load Models (cached so they load only once) ---
+# ---------------- PAGE CONFIG ----------------
+st.set_page_config(
+    page_title="TB Prediction System",
+    page_icon="🩺",
+    layout="wide"
+)
+
+BASE_DIR = Path(__file__).resolve().parent
+
+
+# ---------------- BLUE-WHITE DESIGN ----------------
+st.markdown("""
+<style>
+.stApp {
+    background: #f3f7ff;
+    color: #16345b;
+}
+.block-container {
+    padding-top: 1.5rem;
+    max-width: 1250px;
+}
+.hero {
+    background: linear-gradient(120deg, #dceaff, #ffffff);
+    padding: 28px;
+    border-radius: 18px;
+    border: 1px solid #d2e2ff;
+    margin-bottom: 24px;
+}
+.hero h1 {
+    color: #163c72;
+    margin-bottom: 8px;
+}
+.hero p {
+    color: #58749b;
+    font-size: 16px;
+}
+.section {
+    background: white;
+    padding: 22px;
+    border-radius: 16px;
+    border: 1px solid #dce7f7;
+    margin-bottom: 18px;
+}
+.result-card {
+    background: white;
+    border: 1px solid #dce7f7;
+    border-radius: 14px;
+    padding: 18px;
+    min-height: 175px;
+}
+.score {
+    color: #1769c2;
+    font-size: 30px;
+    font-weight: 700;
+}
+.small-note {
+    color: #647c9c;
+    font-size: 13px;
+}
+div.stButton > button {
+    background: #1769c2;
+    color: white;
+    border-radius: 10px;
+    border: none;
+    min-height: 45px;
+    font-weight: 600;
+}
+div.stButton > button:hover {
+    background: #104f96;
+    color: white;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ---------------- LOAD MODELS ----------------
 @st.cache_resource
 def load_xray_model():
-    return load_model('xray_module/tb_xray_model.h5')
+    path = BASE_DIR / "xray_module" / "tb_xray_model.h5"
+    return load_model(str(path))
+
 
 @st.cache_resource
 def load_clinical_model():
-    model = load_model('clinical_module/tb_clinical_model.h5')
-    scaler = joblib.load('clinical_module/clinical_scaler.pkl')
-    features = joblib.load('clinical_module/clinical_features.pkl')
+    folder = BASE_DIR / "clinical_module"
+
+    model = load_model(str(folder / "tb_clinical_model.h5"))
+    scaler = joblib.load(folder / "clinical_scaler.pkl")
+    features = joblib.load(folder / "clinical_features.pkl")
+
     return model, scaler, features
 
-xray_model = load_xray_model()
-clinical_model, clinical_scaler, clinical_features = load_clinical_model()
 
-# --- Fusion Logic ---
-def combined_prediction(xray_prob=None, clinical_prob=None):
-    probs = []
-    weights = []
+@st.cache_resource
+def load_sputum_model():
+    path = BASE_DIR / "sputum_module" / "sputum_model_finetuned.keras"
+    return load_model(str(path))
 
-    if xray_prob is not None:
-        probs.append(xray_prob)
-        weights.append(0.6)   # X-ray is generally more reliable
-    if clinical_prob is not None:
-        probs.append(clinical_prob)
-        weights.append(0.4)
 
-    if not probs:
-        return None, "No input provided"
+# Load cough model only when cough analysis is requested.
+@st.cache_resource
+def load_cough_predictor():
+    import sys
 
-    final_score = sum(p * w for p, w in zip(probs, weights)) / sum(weights)
-    label = "TB Positive" if final_score > 0.5 else "Normal"
-    return round(float(final_score), 3), label
+    folder = str(BASE_DIR / "cough_audio_module")
+    if folder not in sys.path:
+        sys.path.insert(0, folder)
 
-# --- UI ---
-st.title("🩺 Tuberculosis Prediction System")
-st.write("Upload a chest X-ray and/or enter symptom details to get a TB risk prediction. You can provide either or both.")
+    from cough_module import predict_cough
+    return predict_cough
 
-xray_prob = None
-clinical_prob = None
 
-# --- X-ray Section ---
-st.subheader("1. Chest X-ray (optional)")
-xray_file = st.file_uploader("Upload chest X-ray image", type=['jpg', 'jpeg', 'png'])
-if xray_file:
-    img = image.load_img(xray_file, target_size=(224, 224))
-    img_array = image.img_to_array(img) / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
-    xray_prob = float(xray_model.predict(img_array)[0][0])
-    st.image(img, caption="Uploaded X-ray", width=250)
-    st.write(f"**X-ray model risk score:** {xray_prob:.2f}")
+# ---------------- PREDICTION FUNCTIONS ----------------
+def predict_xray(uploaded_file):
+    img = image.load_img(uploaded_file, target_size=(224, 224))
+    arr = image.img_to_array(img) / 255.0
+    arr = np.expand_dims(arr, axis=0)
 
-# --- Clinical Section ---
-st.subheader("2. Symptoms & Clinical Data (optional)")
-use_clinical = st.checkbox("Enter symptom data")
+    score = float(load_xray_model().predict(arr, verbose=0)[0][0])
+    return score, img
 
-if use_clinical:
-    col1, col2 = st.columns(2)
-    with col1:
-        patient_age = st.number_input("Age", 0, 120, 30)
-        gender = st.selectbox("Gender", ["Male", "Female"])
-        cough_duration = st.number_input("Cough duration (weeks)", 0, 52, 0)
-        fever = st.selectbox("Fever?", ["No", "Yes"])
-        weight_loss = st.selectbox("Weight loss?", ["No", "Yes"])
-        night_sweats = st.selectbox("Night sweats?", ["No", "Yes"])
-    with col2:
-        chest_pain = st.selectbox("Chest pain?", ["No", "Yes"])
-        shortness_breath = st.selectbox("Shortness of breath?", ["No", "Yes"])
-        hemoptysis = st.selectbox("Coughing blood (hemoptysis)?", ["No", "Yes"])
-        smoking_status = st.selectbox("Smoking status?", ["No", "Yes"])
-        bmi = st.number_input("BMI", 10.0, 45.0, 22.0)
-        contact_tb = st.selectbox("Contact with TB patient?", ["No", "Yes"])
 
-    input_dict = {
-        'patient_age': patient_age,
-        'gender': 1 if gender == "Male" else 0,
-        'cough_duration': cough_duration,
-        'fever': 1 if fever == "Yes" else 0,
-        'weight_loss': 1 if weight_loss == "Yes" else 0,
-        'night_sweats': 1 if night_sweats == "Yes" else 0,
-        'chest_pain': 1 if chest_pain == "Yes" else 0,
-        'shortness_breath': 1 if shortness_breath == "Yes" else 0,
-        'hemoptysis': 1 if hemoptysis == "Yes" else 0,
-        'smoking_status': 1 if smoking_status == "Yes" else 0,
-        'bmi': bmi,
-        'contact_tb': 1 if contact_tb == "Yes" else 0,
-    }
+def predict_clinical(input_dict):
+    model, scaler, features = load_clinical_model()
 
-    input_data = np.array([[input_dict[f] for f in clinical_features]])
-    input_scaled = clinical_scaler.transform(input_data)
-    clinical_prob = float(clinical_model.predict(input_scaled)[0][0])
-    st.write(f"**Clinical model risk score:** {clinical_prob:.2f}")
+    values = np.array([[input_dict[f] for f in features]])
+    scaled = scaler.transform(values)
 
-# --- Final Combined Prediction ---
-st.subheader("Final Prediction")
-if st.button("Get Combined Prediction"):
-    final_score, label = combined_prediction(xray_prob, clinical_prob)
-    if final_score is not None:
-        if label == "TB Positive":
-            st.error(f"**Result: {label}**  (confidence score: {final_score})")
-        else:
-            st.success(f"**Result: {label}**  (confidence score: {final_score})")
+    score = float(model.predict(scaled, verbose=0)[0][0])
+    return score
+
+
+def predict_sputum(uploaded_file):
+    img = Image.open(uploaded_file).convert("RGB")
+    img = img.resize((224, 224))
+
+    arr = np.array(img, dtype=np.float32)
+    arr = np.expand_dims(arr, axis=0)
+
+    # Must match the preprocessing used during model training.
+    score = float(load_sputum_model().predict(arr, verbose=0)[0][0])
+    return score, img
+
+
+def predict_cough(uploaded_file):
+    predictor = load_cough_predictor()
+
+    # The existing cough model accepts audio file paths.
+    suffix = Path(uploaded_file.name).suffix.lower() or ".wav"
+
+    with tempfile.NamedTemporaryFile(
+        suffix=suffix, delete=True
+    ) as temp_file:
+        temp_file.write(uploaded_file.getvalue())
+        temp_file.flush()
+
+        score = float(predictor([temp_file.name]))
+
+    return score
+
+
+def result_label(score):
+    return "TB-positive class" if score >= 0.5 else "Normal/negative class"
+
+
+def show_result(title, score):
+    st.markdown(f"""
+    <div class="result-card">
+        <h3>{title}</h3>
+        <div class="score">{score * 100:.1f}%</div>
+        <p>{result_label(score)}</p>
+        <p class="small-note">
+            Model output only — not a confirmed diagnosis.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ---------------- HEADER ----------------
+st.markdown("""
+<div class="hero">
+    <h1>🩺 TB Prediction System</h1>
+    <p>
+        Multimodal research dashboard for chest X-ray, clinical data,
+        sputum images and cough audio.
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ---------------- INPUTS ----------------
+st.markdown('<div class="section">', unsafe_allow_html=True)
+st.header("📥 Prediction Center")
+st.write("Upload one or more inputs. Then click Analyze to run the available models.")
+st.markdown('</div>', unsafe_allow_html=True)
+
+left, right = st.columns(2)
+
+with left:
+    st.markdown('<div class="section">', unsafe_allow_html=True)
+    st.subheader("🩻 1. Chest X-ray")
+    xray_file = st.file_uploader(
+        "Upload chest X-ray",
+        type=["jpg", "jpeg", "png"],
+        key="xray_upload"
+    )
+    if xray_file:
+        st.image(xray_file, caption="Uploaded chest X-ray", width=250)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section">', unsafe_allow_html=True)
+    st.subheader("🔬 2. Sputum Image")
+    sputum_file = st.file_uploader(
+        "Upload sputum smear image",
+        type=["jpg", "jpeg", "png"],
+        key="sputum_upload"
+    )
+    if sputum_file:
+        st.image(sputum_file, caption="Uploaded sputum image", width=250)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with right:
+    st.markdown('<div class="section">', unsafe_allow_html=True)
+    st.subheader("🎧 3. Cough Audio")
+    st.write("Upload a cough recording for the existing audio model.")
+    cough_file = st.file_uploader(
+        "Upload cough audio (WAV recommended)",
+        type=["wav"],
+        key="cough_upload"
+    )
+    if cough_file:
+        st.audio(cough_file, format="audio/wav")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section">', unsafe_allow_html=True)
+    st.subheader("🧬 4. Clinical Data")
+    use_clinical = st.checkbox(
+        "Enter clinical and symptom details",
+        key="use_clinical"
+    )
+
+    clinical_values = None
+
+    if use_clinical:
+        with st.form("clinical_form"):
+            col1, col2 = st.columns(2)
+
+            with col1:
+                age = st.number_input("Age", 0, 120, 30)
+                gender = st.selectbox("Gender", ["Male", "Female"])
+                cough_duration = st.number_input(
+                    "Cough duration (weeks)", 0, 52, 0
+                )
+                fever = st.selectbox("Fever?", ["No", "Yes"])
+                weight_loss = st.selectbox("Weight loss?", ["No", "Yes"])
+                night_sweats = st.selectbox(
+                    "Night sweats?", ["No", "Yes"]
+                )
+
+            with col2:
+                chest_pain = st.selectbox("Chest pain?", ["No", "Yes"])
+                breathlessness = st.selectbox(
+                    "Shortness of breath?", ["No", "Yes"]
+                )
+                hemoptysis = st.selectbox(
+                    "Coughing blood?", ["No", "Yes"]
+                )
+                smoking = st.selectbox("Smoking status?", ["No", "Yes"])
+                bmi = st.number_input("BMI", 10.0, 45.0, 22.0)
+                contact_tb = st.selectbox(
+                    "Contact with TB patient?", ["No", "Yes"]
+                )
+
+            submitted = st.form_submit_button("Save Clinical Inputs")
+
+        if submitted:
+            clinical_values = {
+                "patient_age": age,
+                "gender": 1 if gender == "Male" else 0,
+                "cough_duration": cough_duration,
+                "fever": int(fever == "Yes"),
+                "weight_loss": int(weight_loss == "Yes"),
+                "night_sweats": int(night_sweats == "Yes"),
+                "chest_pain": int(chest_pain == "Yes"),
+                "shortness_breath": int(breathlessness == "Yes"),
+                "hemoptysis": int(hemoptysis == "Yes"),
+                "smoking_status": int(smoking == "Yes"),
+                "bmi": bmi,
+                "contact_tb": int(contact_tb == "Yes"),
+            }
+            st.session_state["clinical_values"] = clinical_values
+
+        clinical_values = st.session_state.get("clinical_values")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ---------------- ANALYZE ----------------
+st.markdown("---")
+
+if st.button("🔍 Analyze Available Inputs", use_container_width=True):
+    if not any([xray_file, sputum_file, cough_file, clinical_values]):
+        st.warning("Please upload at least one file or save clinical inputs.")
     else:
-        st.warning("Please upload an X-ray or enter symptom data first.")
+        results = {}
+        errors = {}
 
-st.caption("⚠️ This is a student/research project and NOT a certified medical diagnostic tool. Please consult a doctor for actual diagnosis.")
+        with st.spinner("Analyzing available inputs..."):
+
+            if xray_file:
+                try:
+                    results["Chest X-ray"] = predict_xray(xray_file)[0]
+                except Exception as e:
+                    errors["Chest X-ray"] = str(e)
+
+            if sputum_file:
+                try:
+                    results["Sputum Image"] = predict_sputum(sputum_file)[0]
+                except Exception as e:
+                    errors["Sputum Image"] = str(e)
+
+            if cough_file:
+                try:
+                    results["Cough Audio"] = predict_cough(cough_file)
+                except Exception as e:
+                    errors["Cough Audio"] = str(e)
+
+            if clinical_values:
+                try:
+                    results["Clinical Data"] = predict_clinical(clinical_values)
+                except Exception as e:
+                    errors["Clinical Data"] = str(e)
+
+        st.session_state["prediction_results"] = results
+        st.session_state["prediction_errors"] = errors
+
+
+# ---------------- DISPLAY RESULTS ----------------
+results = st.session_state.get("prediction_results", {})
+errors = st.session_state.get("prediction_errors", {})
+
+if results or errors:
+    st.markdown("---")
+    st.header("📊 Individual Model Results")
+
+    if results:
+        cols = st.columns(min(2, len(results)))
+
+        for index, (name, score) in enumerate(results.items()):
+            with cols[index % len(cols)]:
+                show_result(name, score)
+
+    if errors:
+        st.subheader("⚠️ Modules needing attention")
+        for name, error in errors.items():
+            st.error(f"{name}: {error}")
+
+    if "Chest X-ray" in results and "Clinical Data" in results:
+        st.markdown("---")
+        st.subheader("🎯 Combined X-ray + Clinical Score")
+
+        combined = (
+            0.6 * results["Chest X-ray"]
+            + 0.4 * results["Clinical Data"]
+        )
+
+        st.metric("Combined model score", f"{combined * 100:.1f}%")
+        st.write(f"Model output: **{result_label(combined)}**")
+        st.caption(
+            "This is an experimental weighted score, not a clinically "
+            "validated probability. Sputum and cough are shown separately."
+        )
+
+
+# ---------------- DISCLAIMER ----------------
+st.markdown("---")
+st.warning(
+    "Educational research project only. These outputs are not a medical "
+    "diagnosis. Do not use this application to make treatment decisions. "
+    "Consult a qualified healthcare professional for TB testing."
+)
