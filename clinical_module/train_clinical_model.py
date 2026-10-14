@@ -11,9 +11,9 @@ import joblib
 df = pd.read_csv('dataset2/train.csv')
 
 # Features (excluding xray_result to avoid data leakage, and tb_diagnosis which is target)
-features = ['patient_age', 'gender', 'cough_duration', 'fever', 'weight_loss',
-            'night_sweats', 'chest_pain', 'shortness_breath', 'hemoptysis',
-            'smoking_status', 'bmi', 'contact_tb']
+# Use features that can be represented consistently by the current form.
+features = ['patient_age', 'gender', 'cough_duration',
+            'night_sweats', 'hemoptysis']
 
 target = 'tb_diagnosis'
 
